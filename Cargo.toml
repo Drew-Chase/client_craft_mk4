@@ -1,3 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["tools/fetch_minecraft_recipes"]
+
 [package]
 name = "client_craft_mk4"
 version = "0.1.0"
