@@ -1,0 +1,2 @@
+[env]
+TEST_RECIPE_DIRECTORY="./target/recipes"

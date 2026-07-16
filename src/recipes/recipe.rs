@@ -7,15 +7,15 @@ pub struct Recipe {
     #[serde(rename = "type")]
     pub recipe_type: RecipeType,
     pub group: Option<String>,
-    pub key: Option<HashMap<String, KeyValue>>,
-    pub ingredients: Option<Vec<String>>,
-    pub pattern: Option<Vec<String>>,
-    pub result: RecipeResult,
+    pub key: Option<HashMap<String, StringOrArray>>,
+    pub ingredients: Option<Vec<StringOrArray>>,
+    pub pattern: Option<StringOrArray>,
+    pub result: Option<RecipeResult>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
-pub enum KeyValue{
+pub enum StringOrArray {
     String(String),
     Array(Vec<String>),
 }
@@ -28,16 +28,19 @@ pub struct RecipeResult {
 }
 
 mod tests {
-    use super::*;
     #[test]
     fn parse_recipe_files() {
-        for file in std::fs::read_dir("./benches/recipes").unwrap() {
+        use super::Recipe;
+        let mut items = 0;
+        for file in std::fs::read_dir(env!("TEST_RECIPE_DIRECTORY")).unwrap() {
             let file = file.unwrap();
             let content = std::fs::read_to_string(file.path()).unwrap();
             if let Err(e) = serde_json::from_str::<Recipe>(&content) {
                 eprintln!("{}", content);
                 panic!("{}", e)
             }
+            items += 1;
         }
+        println!("All {items} recipes successfully were parsed!");
     }
 }
