@@ -35,3 +35,4 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 benches/recipes
+.idea/claudeCodeTabState.xml
