@@ -7,8 +7,8 @@
           <value>
             <TabSessionState>
               <option name="provider" value="claude" />
-              <option name="sessionId" value="020f24f0-1621-47b4-b31e-ca75e6d7c48c" />
-              <option name="cwd" value="D:\RustRover\client_craft_mk4" />
+              <option name="sessionId" value="90a217e6-b7b9-45dd-9903-ee87abf8d15d" />
+              <option name="cwd" value="D:\JetBrains\RustRover\client_craft_mk4" />
               <option name="model" value="claude-opus-4-8" />
               <option name="permissionMode" value="bypassPermissions" />
             </TabSessionState>
