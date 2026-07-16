@@ -13,5 +13,8 @@ build:
 unique_crafting_types:
     @cargo run --example unique_crafting_types
 
+fetch_recipes:
+    @cargo run --package fetch_minecraft_recipes --release
+
 test:
     @cargo test --release
