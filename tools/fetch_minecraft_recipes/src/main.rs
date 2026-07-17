@@ -9,9 +9,12 @@ use std::thread;
 async fn main() -> Result<()> {
     color_eyre::install()?;
     let (temp, jar_path) = download_jar().await?;
-    let recipes_dir = extract_jar(&temp, &jar_path)?;
+    let data_dir = extract_jar(&temp, &jar_path)?;
 
-    println!("Copying recipes file to target");
+    // Recipes and item tags are extracted from the *same* jar so they stay on the
+    // same Minecraft version (recipe ingredients reference tags like #minecraft:planks).
+    println!("Copying recipe files to target");
+    let recipes_dir = data_dir.join("recipe");
     let target_recipes = PathBuf::from(env!("TEST_RECIPE_DIRECTORY"));
     std::fs::create_dir_all(&target_recipes)?;
     for recipe in std::fs::read_dir(&recipes_dir)? {
@@ -26,11 +29,35 @@ async fn main() -> Result<()> {
             .to_string_lossy()
             .to_string();
         let target = target_recipes.join(filename);
-        println!("Copying {path:?} to {target:?}");
         std::fs::copy(path, target)?;
     }
+
+    println!("Copying item tag files to target");
+    let tags_dir = data_dir.join("tags").join("item");
+    let target_tags = PathBuf::from(env!("TEST_TAGS_DIRECTORY"));
+    std::fs::create_dir_all(&target_tags)?;
+    // Tag ids can contain slashes (e.g. #minecraft:foo/bar), so preserve the tree.
+    copy_tree(&tags_dir, &target_tags)?;
+
     cleanup(&temp)?;
     println!("Done!");
+    Ok(())
+}
+
+/// Recursively copies every file under `src` into `dst`, preserving the relative
+/// directory structure so nested tag paths (e.g. `item/foo/bar.json`) survive.
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            copy_tree(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target)?;
+        }
+    }
     Ok(())
 }
 
@@ -80,10 +107,7 @@ fn extract_jar(temp: &Path, jar_file: &PathBuf) -> Result<PathBuf> {
         jar_file.display(),
         archive_extract_dir.display()
     );
-    Ok(archive_extract_dir
-        .join("data")
-        .join("minecraft")
-        .join("recipe"))
+    Ok(archive_extract_dir.join("data").join("minecraft"))
 }
 
 fn cleanup(path: &PathBuf) -> Result<()> {
