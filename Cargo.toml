@@ -15,15 +15,20 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+thiserror = { version = "2.0.18" }
 
 [dev-dependencies]
 divan = { version = "0.1.21" }
+rand = { version = "0.10.2" }
 
 [[bench]]
-name = "slow"
+name = "benchmarks"
 harness = false
 
+[[example]]
+name = "unique_crafting_types"
+path = "tools/unique_crafting_types.rs"
 
 [[example]]
-name="unique_crafting_types"
-path="tools/unique_crafting_types.rs"
+name = "get_random_recipes"
+path = "tools/get_random_recipes.rs"

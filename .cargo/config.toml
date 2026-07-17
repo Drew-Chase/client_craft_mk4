@@ -1,2 +1,3 @@
 [env]
 TEST_RECIPE_DIRECTORY="./target/recipes"
+TEST_FAKE_INVENTORY_FILE="./target/fake_inv.json"
