@@ -5,7 +5,7 @@ use crate::recipes::Item;
 use std::collections::{HashMap, HashSet};
 
 /// Craftable quantities are capped at this value in the reference output.
-const MAX_QUANTITY: u64 = 999;
+const MAX_QUANTITY: u64 = 999_999;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TreeBuilderError {
