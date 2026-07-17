@@ -39,6 +39,13 @@ pub struct Tags {
 }
 
 impl Tags {
+    /// Registers one tag: a full tag id (e.g. `minecraft:planks`) and its member
+    /// tokens, each an item id or a nested `#tag` reference. Re-registering a tag
+    /// replaces its previous members.
+    pub fn add(&mut self, tag: String, members: Vec<String>) {
+        self.tags.insert(tag, members);
+    }
+
     /// Loads every `*.json` tag file under `dir`, keyed by `minecraft:<relative/path>`
     /// so nested tag ids (which may contain `/`) resolve to the correct file.
     pub fn load_from_filesystem(dir: impl AsRef<Path>) -> Result<Self, RecipeError> {
