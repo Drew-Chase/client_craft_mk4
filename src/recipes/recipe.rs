@@ -1,6 +1,15 @@
 use crate::recipes::recipe_type::RecipeType;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::Path;
+
+#[derive(thiserror::Error, Debug)]
+pub enum RecipeError {
+    #[error(transparent)]
+    SerializationError(#[from] serde_json::Error),
+    #[error(transparent)]
+    IOError(#[from] std::io::Error),
+}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Recipe {
@@ -27,20 +36,27 @@ pub struct RecipeResult {
     pub count: u8,
 }
 
+impl Recipe {
+    pub fn load_from_filesystem(recipes_dir: impl AsRef<Path>) -> Result<Vec<Self>, RecipeError> {
+        let recipes_dir = recipes_dir.as_ref();
+        let mut items = vec![];
+        for file in std::fs::read_dir(recipes_dir)? {
+            let file = file?;
+            let content = std::fs::read_to_string(file.path())?;
+            let item = serde_json::from_str::<Recipe>(&content)?;
+            items.push(item);
+        }
+        Ok(items)
+    }
+}
+
 mod tests {
     #[test]
     fn parse_recipe_files() {
         use super::Recipe;
-        let mut items = 0;
-        for file in std::fs::read_dir(env!("TEST_RECIPE_DIRECTORY")).unwrap() {
-            let file = file.unwrap();
-            let content = std::fs::read_to_string(file.path()).unwrap();
-            if let Err(e) = serde_json::from_str::<Recipe>(&content) {
-                eprintln!("{}", content);
-                panic!("{}", e)
-            }
-            items += 1;
-        }
+        let items = Recipe::load_from_filesystem(env!("TEST_RECIPE_DIRECTORY"))
+            .unwrap()
+            .len();
         println!("All {items} recipes successfully were parsed!");
     }
 }

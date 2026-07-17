@@ -1,3 +1,11 @@
+use serde::{Deserialize, Serialize};
+
 pub mod recipe;
-mod recipe_type;
-mod tree_builder;
+pub mod recipe_type;
+pub mod tree_builder;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Item {
+    pub id: String,
+    pub quantity: u8,
+}

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer};
 
-#[derive( Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecipeType {
     CraftingSpecialMapextending,
     SmithingTransform,
@@ -74,8 +74,8 @@ impl From<String> for RecipeType {
 
 impl<'de> Deserialize<'de> for RecipeType {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                      where
-                          D: Deserializer<'de>
+    where
+        D: Deserializer<'de>,
     {
         let str_value = String::deserialize(deserializer)?;
         Ok(RecipeType::from(str_value))
