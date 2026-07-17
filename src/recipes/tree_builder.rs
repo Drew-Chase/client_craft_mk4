@@ -51,6 +51,145 @@ struct PreparedRecipe {
     slots: Vec<Slot>,
 }
 
+/// A recipe in transport-agnostic form: an output id, its yield, and ingredient
+/// slots given as raw tokens (item ids or `#tag` references). Both the serde
+/// [`Recipe`] path and the FFI builder feed the engine through this shape.
+pub(crate) struct RawRecipe<'a> {
+    pub output: &'a str,
+    pub yield_count: u64,
+    pub slots: Vec<RawSlot<'a>>,
+}
+
+/// One ingredient slot: the interchangeable tokens that can fill it and how many
+/// times the recipe consumes it.
+pub(crate) struct RawSlot<'a> {
+    pub tokens: Vec<&'a str>,
+    pub count: u64,
+}
+
+/// The inventory-independent, fully prepared crafting index: interned ids plus
+/// consolidated recipes grouped by output. Build it once per recipe/tag set and
+/// call [`PreparedIndex::run`] per inventory.
+pub(crate) struct PreparedIndex {
+    interner: Interner,
+    recipe_lists: Vec<Vec<PreparedRecipe>>,
+}
+
+/// Expands, interns, and consolidates raw recipes against `tags`. A recipe with a
+/// slot that has no options left after excluding the recipe's own output is
+/// invalid and dropped entirely (it doesn't count toward the recipe split either)
+/// — this is what keeps self-duplicating recipes like armor-trim templates
+/// uncraftable, matching the reference.
+pub(crate) fn prepare_index<'a>(
+    recipes: impl IntoIterator<Item = RawRecipe<'a>>,
+    tags: &Tags,
+) -> PreparedIndex {
+    let mut interner = Interner::default();
+    // Tag/item tokens repeat heavily across recipes (#planks appears in dozens),
+    // so each unique token is expanded and interned exactly once.
+    let mut token_cache: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut prepared: Vec<(u32, PreparedRecipe)> = Vec::new();
+
+    'recipes: for raw in recipes {
+        let output = interner.intern(raw.output);
+        let mut merged: HashMap<Vec<u32>, u64> = HashMap::new();
+        for slot in &raw.slots {
+            let mut options: Vec<u32> = Vec::new();
+            for token in &slot.tokens {
+                if !token_cache.contains_key(*token) {
+                    let mut ids: Vec<u32> = tags
+                        .resolve(token)
+                        .iter()
+                        .map(|id| interner.intern(id))
+                        .collect();
+                    ids.sort_unstable();
+                    token_cache.insert(token.to_string(), ids);
+                }
+                options.extend(
+                    token_cache[*token]
+                        .iter()
+                        .copied()
+                        .filter(|&id| id != output),
+                );
+            }
+            if options.is_empty() {
+                continue 'recipes; // invalid recipe
+            }
+            options.sort_unstable();
+            options.dedup();
+            *merged.entry(options).or_default() += slot.count;
+        }
+        let slots = merged
+            .into_iter()
+            .map(|(options, count)| Slot { options, count })
+            .collect();
+        prepared.push((
+            output,
+            PreparedRecipe {
+                yield_count: raw.yield_count,
+                slots,
+            },
+        ));
+    }
+
+    let n = interner.len();
+    let mut recipe_lists: Vec<Vec<PreparedRecipe>> = Vec::with_capacity(n);
+    recipe_lists.resize_with(n, Vec::new);
+    for (output, recipe) in prepared {
+        recipe_lists[output as usize].push(recipe);
+    }
+
+    PreparedIndex {
+        interner,
+        recipe_lists,
+    }
+}
+
+impl PreparedIndex {
+    /// Computes the craftable items for one inventory. Inventory ids no recipe
+    /// references are ignored: they cannot appear as outputs or ingredients.
+    pub(crate) fn run(&self, items: &[Item]) -> Vec<Item> {
+        let n = self.interner.len();
+        let mut inventory = vec![0u64; n];
+        let mut in_inventory = vec![false; n];
+        for item in items {
+            if let Some(&id) = self.interner.ids.get(&item.id) {
+                inventory[id as usize] += item.quantity as u64;
+                in_inventory[id as usize] = true;
+            }
+        }
+
+        let mut resolver = Resolver {
+            recipes: &self.recipe_lists,
+            inventory: &inventory,
+            in_inventory: &in_inventory,
+            memo: vec![0; n],
+            state: vec![STATE_UNKNOWN; n],
+        };
+
+        // Report every craftable output (>= 1). Provided inventory items are base
+        // resources, not craft results, so they're excluded. When an item has several
+        // recipes the reference splits its total evenly across them and reports one
+        // recipe's share (`maxNewItems / recipeCount`), then caps at MAX_QUANTITY.
+        let mut result = Vec::new();
+        #[allow(clippy::needless_range_loop)] // `id` indexes several arrays and feeds the resolver
+        for id in 0..n {
+            if in_inventory[id] || self.recipe_lists[id].is_empty() {
+                continue;
+            }
+            let quantity = resolver.max_craftable(id) / self.recipe_lists[id].len() as u64;
+            if quantity >= 1 {
+                result.push(Item {
+                    id: self.interner.names[id].clone(),
+                    quantity: quantity.min(MAX_QUANTITY) as u32,
+                });
+            }
+        }
+        result.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        result
+    }
+}
+
 const STATE_UNKNOWN: u8 = 0;
 const STATE_VISITING: u8 = 1;
 const STATE_DONE: u8 = 2;
@@ -79,9 +218,9 @@ impl Resolver<'_> {
         }
     }
 
-    /// Maximum number of `id` producible from the inventory (uncapped). The 999 cap
-    /// is applied only to the final reported list, never to intermediate
-    /// availability, so it does not throttle downstream recipes.
+    /// Maximum number of `id` producible from the inventory (uncapped). The cap is
+    /// applied only to the final reported list, never to intermediate availability,
+    /// so it does not throttle downstream recipes.
     fn max_craftable(&mut self, id: usize) -> u64 {
         match self.state[id] {
             STATE_DONE => return self.memo[id],
@@ -129,78 +268,8 @@ impl TreeBuilder {
     }
 
     pub fn build(&self, items: Vec<Item>, tags: &Tags) -> Result<Vec<Item>, TreeBuilderError> {
-        let mut interner = Interner::default();
-        // Tag/item tokens repeat heavily across recipes (#planks appears in dozens),
-        // so each unique token is expanded and interned exactly once.
-        let mut token_cache: HashMap<String, Vec<u32>> = HashMap::new();
-
-        // Pre-process every recipe into interned, consolidated slots, grouped by output.
-        let mut prepared: Vec<(u32, PreparedRecipe)> = Vec::with_capacity(self.recipes.len());
-        for recipe in &self.recipes {
-            let Some(result) = &recipe.result else {
-                continue;
-            };
-            let output = interner.intern(&result.id);
-            // An invalid recipe (a slot left empty after excluding the output) is
-            // dropped entirely; it doesn't count toward the recipe split either.
-            let Some(slots) = prepare_slots(recipe, output, tags, &mut interner, &mut token_cache)
-            else {
-                continue;
-            };
-            let yield_count = if result.count == 0 {
-                1
-            } else {
-                result.count as u64
-            };
-            prepared.push((output, PreparedRecipe { yield_count, slots }));
-        }
-        for item in &items {
-            interner.intern(&item.id);
-        }
-
-        let n = interner.len();
-        let mut recipe_lists: Vec<Vec<PreparedRecipe>> = Vec::with_capacity(n);
-        recipe_lists.resize_with(n, Vec::new);
-        for (output, recipe) in prepared {
-            recipe_lists[output as usize].push(recipe);
-        }
-
-        let mut inventory = vec![0u64; n];
-        let mut in_inventory = vec![false; n];
-        for item in &items {
-            let id = interner.ids[&item.id] as usize;
-            inventory[id] += item.quantity as u64;
-            in_inventory[id] = true;
-        }
-
-        let mut resolver = Resolver {
-            recipes: &recipe_lists,
-            inventory: &inventory,
-            in_inventory: &in_inventory,
-            memo: vec![0; n],
-            state: vec![STATE_UNKNOWN; n],
-        };
-
-        // Report every craftable output (>= 1). Provided inventory items are base
-        // resources, not craft results, so they're excluded. When an item has several
-        // recipes the reference splits its total evenly across them and reports one
-        // recipe's share (`maxNewItems / recipeCount`), then caps at MAX_QUANTITY.
-        let mut result = Vec::new();
-        for id in 0..n {
-            if in_inventory[id] || recipe_lists[id].is_empty() {
-                continue;
-            }
-            let quantity = resolver.max_craftable(id) / recipe_lists[id].len() as u64;
-            if quantity >= 1 {
-                result.push(Item {
-                    id: interner.names[id].clone(),
-                    quantity: quantity.min(MAX_QUANTITY) as u32,
-                });
-            }
-        }
-        result.sort_unstable_by(|a, b| a.id.cmp(&b.id));
-
-        Ok(result)
+        let index = prepare_index(self.recipes.iter().filter_map(recipe_to_raw), tags);
+        Ok(index.run(&items))
     }
 
     pub fn flat(&self) -> HashMap<String, Vec<Item>> {
@@ -234,32 +303,19 @@ impl TreeBuilder {
     }
 }
 
-/// Expands a recipe's ingredients into consolidated [`Slot`]s of interned ids.
-/// Shaped recipes derive per-symbol counts from the pattern; shapeless recipes count
-/// ingredient repeats. Slots sharing an identical option set are merged with their
-/// counts summed. Returns `None` when any slot has no options left after excluding
-/// the recipe's own output — the reference treats such a recipe as invalid (this is
-/// what keeps self-duplicating recipes like armor-trim templates uncraftable).
-fn prepare_slots(
-    recipe: &Recipe,
-    output: u32,
-    tags: &Tags,
-    interner: &mut Interner,
-    token_cache: &mut HashMap<String, Vec<u32>>,
-) -> Option<Vec<Slot>> {
-    let mut merged: HashMap<Vec<u32>, u64> = HashMap::new();
-
-    let mut add = |source: &StringOrArray, count: u64, interner: &mut Interner| {
-        let mut options = resolve_source(source, output, tags, interner, token_cache);
-        if options.is_empty() {
-            return false;
-        }
-        options.sort_unstable();
-        options.dedup();
-        *merged.entry(options).or_default() += count;
-        true
+/// Converts a serde [`Recipe`] into the transport-agnostic [`RawRecipe`] form.
+/// Shaped recipes derive per-symbol counts from the pattern; shapeless recipes
+/// contribute one slot per ingredient. Other recipe types yield no slots (they
+/// stay uncraftable but still count toward the recipe split, like the reference).
+pub(crate) fn recipe_to_raw(recipe: &Recipe) -> Option<RawRecipe<'_>> {
+    let result = recipe.result.as_ref()?;
+    let yield_count = if result.count == 0 {
+        1
+    } else {
+        result.count as u64
     };
 
+    let mut slots = Vec::new();
     match recipe.recipe_type {
         RecipeType::CraftingShaped => {
             if let (Some(key), Some(pattern)) = (&recipe.key, &recipe.pattern) {
@@ -272,8 +328,11 @@ fn prepare_slots(
                         .flat_map(|row| row.chars())
                         .filter(|&ch| ch == symbol)
                         .count() as u64;
-                    if count > 0 && !add(source, count, interner) {
-                        return None;
+                    if count > 0 {
+                        slots.push(RawSlot {
+                            tokens: source_tokens(source),
+                            count,
+                        });
                     }
                 }
             }
@@ -281,21 +340,21 @@ fn prepare_slots(
         RecipeType::CraftingShapeless => {
             if let Some(ingredients) = &recipe.ingredients {
                 for source in ingredients {
-                    if !add(source, 1, interner) {
-                        return None;
-                    }
+                    slots.push(RawSlot {
+                        tokens: source_tokens(source),
+                        count: 1,
+                    });
                 }
             }
         }
         _ => {}
     }
 
-    Some(
-        merged
-            .into_iter()
-            .map(|(options, count)| Slot { options, count })
-            .collect(),
-    )
+    Some(RawRecipe {
+        output: &result.id,
+        yield_count,
+        slots,
+    })
 }
 
 /// Yields the string rows of a shaped recipe's `pattern` (a single string or array).
@@ -306,38 +365,11 @@ fn pattern_rows(pattern: &StringOrArray) -> Vec<&str> {
     }
 }
 
-/// Resolves an ingredient source (a token or an array of tokens, each an item id or
-/// a `#tag`) into interned option ids, excluding the recipe's own output. Expansion
-/// per unique token is cached.
-fn resolve_source(
-    source: &StringOrArray,
-    output: u32,
-    tags: &Tags,
-    interner: &mut Interner,
-    token_cache: &mut HashMap<String, Vec<u32>>,
-) -> Vec<u32> {
-    let mut options = Vec::new();
-    let mut add_token = |token: &str, interner: &mut Interner| {
-        if !token_cache.contains_key(token) {
-            let mut ids: Vec<u32> = tags
-                .resolve(token)
-                .iter()
-                .map(|id| interner.intern(id))
-                .collect();
-            ids.sort_unstable();
-            token_cache.insert(token.to_string(), ids);
-        }
-        options.extend(token_cache[token].iter().copied().filter(|&id| id != output));
-    };
+fn source_tokens(source: &StringOrArray) -> Vec<&str> {
     match source {
-        StringOrArray::String(token) => add_token(token, interner),
-        StringOrArray::Array(tokens) => {
-            for token in tokens {
-                add_token(token, interner);
-            }
-        }
+        StringOrArray::String(token) => vec![token.as_str()],
+        StringOrArray::Array(tokens) => tokens.iter().map(|t| t.as_str()).collect(),
     }
-    options
 }
 
 #[cfg(test)]
